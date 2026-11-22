@@ -1,0 +1,65 @@
+name: Bump Antigravity CLI and the base images
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Open a pull request when something is newer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          file=ha-antigravity/Dockerfile
+          digest() { docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}'; }
+          base="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
+          arm="$(curl -fsSL "$base/linux_arm64.json")"
+          amd="$(curl -fsSL "$base/linux_amd64.json")"
+          agy="$(jq -r '.version' <<<"$arm")"
+          agy_amd="$(jq -r '.version' <<<"$amd")"
+          [[ "$agy" == "$agy_amd" ]] || { echo "arch version mismatch: $agy vs $agy_amd"; exit 1; }
+          [[ "$agy" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a version: $agy"; exit 1; }
+          url_arm="$(jq -r '.url' <<<"$arm")"
+          sha_arm="$(jq -r '.sha512' <<<"$arm")"
+          url_amd="$(jq -r '.url' <<<"$amd")"
+          sha_amd="$(jq -r '.sha512' <<<"$amd")"
+          for u in "$url_arm" "$url_amd"; do
+            [[ "$u" =~ ^https://storage\.googleapis\.com/antigravity-public/[A-Za-z0-9._/-]+$ ]] || { echo "bad url: $u"; exit 1; }
+          done
+          for s in "$sha_arm" "$sha_amd"; do
+            [[ "$s" =~ ^[0-9a-f]{128}$ ]] || { echo "bad sha512: $s"; exit 1; }
+          done
+          node="$(digest node:22-bookworm-slim)"
+          ubuntu="$(digest ubuntu:24.04)"
+          for d in "$node" "$ubuntu"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "not a digest: $d"; exit 1; }
+          done
+          sed -i -E \
+            -e "s/^ARG AGY_VERSION=.*/ARG AGY_VERSION=$agy/" \
+            -e "s|^ARG AGY_URL_ARM64=.*|ARG AGY_URL_ARM64=$url_arm|" \
+            -e "s/^ARG AGY_SHA512_ARM64=.*/ARG AGY_SHA512_ARM64=$sha_arm/" \
+            -e "s|^ARG AGY_URL_AMD64=.*|ARG AGY_URL_AMD64=$url_amd|" \
+            -e "s/^ARG AGY_SHA512_AMD64=.*/ARG AGY_SHA512_AMD64=$sha_amd/" \
+            -e "s|^(FROM node:22-bookworm-slim)@sha256:[0-9a-f]{64}|\\1@$node|" \
+            -e "s|^(FROM ubuntu:24.04)@sha256:[0-9a-f]{64}|\\1@$ubuntu|" "$file"
+          if git diff --quiet -- "$file"; then echo "nothing is newer"; exit 0; fi
+          grep -c "@$node AS node\$" "$file" | grep -qx 1
+          grep -c "^FROM ubuntu:24.04@$ubuntu\$" "$file" | grep -qx 1
+          branch="bump-$(git diff -- "$file" | sha256sum | cut -c1-12)"
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "pull request already open"; exit 0; }
+          title="fix: Antigravity CLI $agy and this week's base images"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -am "$title"
+          git push origin "$branch"
+          gh pr create --title "$title" --body "Moves what the Dockerfile pins to what is current: Antigravity CLI $agy (arm64 + amd64 SHA-512), and the digests of \`node:22-bookworm-slim\` and \`ubuntu:24.04\`."

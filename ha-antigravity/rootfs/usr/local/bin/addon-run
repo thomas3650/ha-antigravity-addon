@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Main process of the add-on. Runs as root. Antigravity CLI runs as the user
+# "antigravity" and never sees this process's environment.
+set -uo pipefail
+
+LIB=/usr/local/lib/ha-antigravity
+for f in paths log options env layout sync managed retention diagnostics web session outcome morning result run report memory jobs fixed mqtt commands; do
+  # shellcheck disable=SC1090
+  . "$LIB/$f.sh"
+done
+
+install_extra_packages() {
+  local -a packages
+  mapfile -t packages < <(jq -r '.extra_packages[]? // empty' "$HC_OPTIONS" 2>/dev/null)
+  (( ${#packages[@]} )) || return 0
+  log "installing extra packages: ${packages[*]}"
+  if ! { timeout 120 apt-get update -qq && timeout 600 apt-get install -y --no-install-recommends "${packages[@]}"; } </dev/null; then
+    log "WARNING: extra packages could not be installed; continuing"
+  fi
+}
+
+start_ingress() {
+  write_proxy_auth
+  write_extra_auth
+  rm -f /etc/nginx/nginx.conf
+  ( umask 077; render_nginx_conf /etc/nginx/templates/ingress.conf.tpl > /etc/nginx/nginx.conf )
+  nginx || log "WARNING: nginx did not start; the panel and the way to Home Assistant are down"
+  ttyd -i lo -p 7682 -W /usr/local/bin/ha-antigravity-attach >/dev/null 2>&1 &
+  ttyd -i lo -p 7683 -W /usr/local/bin/ha-antigravity-shell >/dev/null 2>&1 &
+}
+
+shutdown() {
+  log "stopping"
+  jobs_stop
+  mqtt_listen_stop
+  as_antigravity tmux -L "$HC_TMUX_SOCKET" kill-server 2>/dev/null || true
+  pkill -TERM -u "$HC_USER" 2>/dev/null || true
+  nginx -s quit 2>/dev/null || true
+  exit 0
+}
+trap shutdown TERM INT
+
+resolve_tz
+ensure_layout
+jobs_startup
+jobs_can_run || true
+install_extra_packages
+run_diagnostics
+sync_workspace
+ensure_layout
+fixed_place
+install_managed_settings
+start_ingress
+{ check_proxy; check_extra_mcp; } &
+start_chat
+jobs_after_run
+logged_in || log "Antigravity CLI is not logged in: open the add-on's web terminal and follow the steps shown"
+prune_handover
+pruned="$(date +%F)"
+log "ready"
+
+ticks=0
+line=""
+while true; do
+  if read_command 5 line; then
+    handle_command "$line"
+  else
+    rc=$?
+    if (( rc == 1 )); then sleep 5 & wait $!; fi
+  fi
+  jobs_after_run
+  jobs_requests
+  ticks=$((ticks + 1))
+  if (( ticks % 6 == 0 )); then chat_alive || start_chat; fi
+  today="$(date +%F)"
+  if [[ "$today" != "$pruned" ]]; then
+    prune_handover
+    pruned="$today"
+  fi
+done

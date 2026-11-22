@@ -1,0 +1,76 @@
+name: HA Antigravity
+version: 0.1.0
+slug: ha_antigravity
+description: Google Antigravity CLI with Remote Control as an always-on assistant
+url: https://github.com/thomas3650/ha-antigravity-addon
+image: ghcr.io/thomas3650/ha-antigravity-addon
+arch:
+  - aarch64
+  - amd64
+init: true
+startup: application
+boot: auto
+stdin: true
+homeassistant_api: true
+services:
+  - mqtt:want
+ingress: true
+ingress_port: 7681
+ingress_stream: true
+panel_icon: mdi:robot-outline
+panel_title: Antigravity
+watchdog: tcp://[HOST]:[PORT:7681]
+backup_exclude:
+  - home/.cache/**
+  - home/.npm/**
+  - home/.gemini/antigravity-cli/log/**
+  - home/.gemini/antigravity-cli/crashes/**
+  - home/.gemini/antigravity-cli/cache/**
+  - home/.gemini/antigravity-cli/brain/**
+  - home/.gemini/antigravity-cli/conversations/**
+  - repo/**
+  - state/morning.log
+  - state/run-*
+  - state/result-*
+  - state/report.out
+  - state/job-*
+options:
+  session_name: Home
+  extra_packages: []
+  assistant_env: []
+  extra_mcp: []
+  extra_mcp_auth: []
+  morning_timeout: 900
+  morning_max_turns: 40
+  run_timeout: 900
+  run_max_turns: 60
+  morning_chat: true
+  chat_resume: false
+  jobs_parallel: 3
+  job_timeout: 1800
+  job_max_turns: 60
+schema:
+  session_name: str
+  repo_url: str?
+  repo_path: match(^[A-Za-z0-9._/-]+$)?
+  deploy_key: password?
+  chat_model: match(^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$)?
+  job_model: match(^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$)?
+  extra_packages:
+    - str
+  assistant_env:
+    - match(^ASSISTANT_[A-Z0-9_]+=.*$)
+  extra_mcp:
+    - match(^[a-z][a-z0-9-]{0,31}=https?://[A-Za-z0-9._:/-]+$)
+  extra_mcp_auth:
+    - password
+  morning_timeout: int(60,3600)
+  morning_max_turns: int(1,200)
+  run_timeout: int(60,3600)
+  run_max_turns: int(1,200)
+  morning_chat: bool
+  morning_job: str?
+  chat_resume: bool
+  jobs_parallel: int(1,10)
+  job_timeout: int(60,3600)
+  job_max_turns: int(1,200)

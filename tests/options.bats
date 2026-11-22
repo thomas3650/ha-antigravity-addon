@@ -1,0 +1,77 @@
+load helpers
+
+@test "opt returns the value of an option" {
+  load_lib options
+  set_options '{"session_name":"Office"}'
+  run opt '.session_name' 'Home'
+  [ "$output" = "Office" ]
+}
+
+@test "opt returns the default when the option is missing or empty" {
+  load_lib options
+  set_options '{"session_name":""}'
+  run opt '.session_name' 'Home'
+  [ "$output" = "Home" ]
+  run opt '.nothing' 'fallback'
+  [ "$output" = "fallback" ]
+}
+
+@test "opt returns the default when there is no options file" {
+  load_lib options
+  run opt '.session_name' 'Home'
+  [ "$status" -eq 0 ]
+  [ "$output" = "Home" ]
+}
+
+@test "paths derive from HC_DATA" {
+  load_lib
+  [ "$HC_WORKSPACE" = "$HC_DATA/workspace/assistant" ]
+  [ "$HC_HANDOVER" = "$HC_DATA/handover" ]
+  [ "$HC_NOTES" = "$HC_DATA/home/notes" ]
+}
+
+@test "the extra_mcp schema accepts a name=upstream entry and refuses characters nginx or sed would read" {
+  re="$(sed -n 's/^    - match(\(.*\))$/\1/p' "$BATS_TEST_DIRNAME/../ha-antigravity/config.yaml" | grep 'https' | head -n 1)"
+  [ -n "$re" ]
+  [[ "tools=http://my-mcp:8000/private_x1" =~ $re ]]
+  [[ "two=https://h:1/p" =~ $re ]]
+  for bad in 'x=http://h/a;b' 'x=http://h/a|b' 'x=http://h/a}' 'x=http://h/a b' 'x=http://h/a?b' 'x=http://h/"' 'X=http://h/a' '=http://h/a' 'x=ftp://h/a'; do
+    if [[ "$bad" =~ $re ]]; then echo "accepted: $bad"; false; fi
+  done
+}
+
+@test "the tokens of extra servers are a list of passwords, empty by default" {
+  f="$BATS_TEST_DIRNAME/../ha-antigravity/config.yaml"
+  grep -qx '  extra_mcp_auth: \[\]' "$f"
+  [ "$(sed -n '/^  extra_mcp_auth:$/{n;p;}' "$f")" = "    - password" ]
+}
+
+@test "opt_bool reads true and false, and gives the default for a missing option or one that is not a bool" {
+  load_lib options
+  set_options '{"a":false,"b":true,"c":"false","d":0}'
+  [ "$(opt_bool '.a' true)" = false ]
+  [ "$(opt_bool '.b' false)" = true ]
+  [ "$(opt_bool '.c' true)" = true ]
+  [ "$(opt_bool '.d' true)" = true ]
+  [ "$(opt_bool '.missing' true)" = true ]
+  [ "$(opt_bool '.missing' false)" = false ]
+  rm "$HC_DATA/options.json"
+  [ "$(opt_bool '.a' true)" = true ]
+}
+
+@test "morning_chat defaults to true, a bool" {
+  f="$BATS_TEST_DIRNAME/../ha-antigravity/config.yaml"
+  grep -qx '  morning_chat: true' "$f"
+  grep -qx '  morning_chat: bool' "$f"
+}
+
+
+@test "the jobs' options have their defaults and limits" {
+  f="$BATS_TEST_DIRNAME/../ha-antigravity/config.yaml"
+  grep -qx '  jobs_parallel: 3' "$f"
+  grep -qx '  jobs_parallel: int(1,10)' "$f"
+  grep -qx '  job_timeout: 1800' "$f"
+  grep -qx '  job_timeout: int(60,3600)' "$f"
+  grep -qx '  job_max_turns: 60' "$f"
+  grep -qx '  job_max_turns: int(1,200)' "$f"
+}

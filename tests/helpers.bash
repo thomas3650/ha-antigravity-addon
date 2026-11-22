@@ -1,0 +1,25 @@
+# Shared set-up for the bats tests. Every test gets its own /data.
+LIB="$BATS_TEST_DIRNAME/../ha-antigravity/rootfs/usr/local/lib/ha-antigravity"
+
+setup() {
+  unset HC_OPTIONS HC_HOME HC_REPO HC_WORKSPACE HC_HANDOVER HC_RESULTS HC_NOTES HC_STATE HC_STATUS HC_SESSION_NAME \
+        HC_JOBS HC_JOB_RESULTS HC_JOB_STATE HC_JOB_REQUESTS HC_JOB_PUBLIC HC_AUTH_FILE HC_CHAT_MODEL \
+        HC_OPENING_PROMPT HC_AGY_BIN HC_LIMIT_BIN SUPERVISOR_TOKEN \
+        HC_CHAT_RESUME HC_CHAT_FRESH HC_RESUME_FAILED CHAT_RESUMING CHAT_RESUME_FAILS \
+        HC_CHAT_QUICK HC_RESUME_TRIES
+  export HC_DATA="$BATS_TEST_TMPDIR/data"
+  export HC_USER="$(id -un)"
+  mkdir -p "$HC_DATA"
+}
+
+load_lib() {
+  local name
+  for name in paths log "$@"; do
+    # shellcheck disable=SC1090
+    source "$LIB/$name.sh"
+  done
+}
+
+set_options() {
+  printf '%s' "$1" > "$HC_DATA/options.json"
+}

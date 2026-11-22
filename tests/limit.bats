@@ -1,0 +1,71 @@
+load helpers
+LIMIT="$BATS_TEST_DIRNAME/../ha-antigravity/rootfs/usr/local/bin/ha-antigravity-limit"
+
+@test "the command's own exit status is passed on" {
+  run "$LIMIT" 10 true
+  [ "$status" -eq 0 ]
+  run "$LIMIT" 10 bash -c 'exit 7'
+  [ "$status" -eq 7 ]
+}
+
+@test "a command that ends early is not waited for" {
+  started=$SECONDS
+  run "$LIMIT" 30 true
+  [ "$status" -eq 0 ]
+  (( SECONDS - started < 5 ))
+}
+
+@test "a command that runs too long is asked to stop, and the status is 124" {
+  started=$SECONDS
+  run "$LIMIT" 1 sleep 20
+  [ "$status" -eq 124 ]
+  (( SECONDS - started < 8 ))
+}
+
+@test "a command that ignores the request is killed after the grace time" {
+  started=$SECONDS
+  HC_LIMIT_GRACE=1 run "$LIMIT" 1 bash -c 'trap "" TERM; while :; do :; done'
+  [ "$status" -eq 124 ]
+  (( SECONDS - started < 10 ))
+}
+
+@test "the command's arguments are passed on unchanged" {
+  run "$LIMIT" 10 printf '%s|' "a b" "c"
+  [ "$output" = "a b|c|" ]
+}
+
+@test "what the command started is stopped with it" {
+  command -v setsid >/dev/null || skip "no setsid here"
+  mark="$BATS_TEST_TMPDIR/child-alive"
+  run "$LIMIT" 1 bash -c "( sleep 4; touch '$mark' ) & wait"
+  [ "$status" -eq 124 ]
+  sleep 5
+  [ ! -e "$mark" ]
+}
+
+@test "a command that ends just as the time is up keeps its own status, also when it left something running" {
+  run "$LIMIT" 1 bash -c 'sleep 20 >/dev/null 2>&1 & sleep 0.6; exit 5'
+  [ "$status" -eq 5 ]
+}
+
+@test "what a command started and left running is stopped when the command ends by itself" {
+  command -v setsid >/dev/null || skip "needs setsid; runs in the container test and in CI"
+  mark="$BATS_TEST_TMPDIR/left"
+  run "$LIMIT" 10 bash -c "( sleep 3; touch '$mark' ) & exit 0"
+  [ "$status" -eq 0 ]
+  sleep 4
+  [ ! -e "$mark" ]
+}
+
+
+@test "the command reads the script's standard input" {
+  run "$LIMIT" 10 cat <<<"the prompt"
+  [ "$status" -eq 0 ]
+  [ "$output" = "the prompt" ]
+}
+
+@test "a command that ends at once costs well under a second, so short commands can run under the limit" {
+  start="$EPOCHREALTIME"
+  for _ in 1 2 3 4 5; do "$LIMIT" 10 sleep 0.1; done
+  awk -v a="$start" -v b="$EPOCHREALTIME" 'BEGIN { exit !(b - a < 3) }'
+}

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# ha-antigravity-browser-mcp - sandboxed Playwright MCP with pinned headless Chromium.
+set -u
+if [[ "$(id -u)" == 0 ]]; then
+  echo "ha-antigravity-browser-mcp: not as root; Chromium's sandbox needs another user" >&2
+  exit 1
+fi
+home="${HOME:-/data/home}"
+out="$home/.cache/ha-antigravity/browser"
+mkdir -p -- "$out" 2>/dev/null || out="$(mktemp -d)"
+exec env -i HOME="$home" LANG=C.UTF-8 TZ="${TZ:-UTC}" PATH=/usr/local/bin:/usr/bin:/bin \
+  PLAYWRIGHT_BROWSERS_PATH=/usr/share/ha-antigravity/browsers \
+  /usr/local/bin/playwright-mcp \
+  --browser chromium --executable-path /usr/share/ha-antigravity/browsers/chrome-headless-shell \
+  --headless --isolated --sandbox --no-webmcp \
+  --snapshot-mode none --image-responses omit \
+  --output-dir "$out" --output-max-size 1048576 \
+  --timeout-navigation 30000

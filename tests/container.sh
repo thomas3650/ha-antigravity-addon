@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+# Smoke test against a built image. Usage: tests/container.sh <image>
+set -euo pipefail
+image="$1"
+name="hc-smoke-$$"
+logs() { docker logs "$name" 2>&1; }
+fail() { echo "FAIL: $*" >&2; logs >&2 || true; docker rm -f "$name" >/dev/null 2>&1; exit 1; }
+if ! command -v timeout >/dev/null 2>&1; then
+  if command -v gtimeout >/dev/null 2>&1; then
+    timeout() { gtimeout "$@"; }
+  else
+    timeout() {
+      local sig=TERM
+      if [[ "${1:-}" == "-s" ]]; then sig="$2"; shift 2; fi
+      local secs="$1"; shift
+      python3 -c '
+import os, signal, subprocess, sys
+sig = getattr(signal, "SIG" + sys.argv[1], signal.SIGTERM)
+secs = float(sys.argv[2])
+p = subprocess.Popen(sys.argv[3:])
+try:
+    sys.exit(p.wait(timeout=secs))
+except subprocess.TimeoutExpired:
+    os.kill(p.pid, sig)
+    p.wait()
+    sys.exit(124)
+' "$sig" "$secs" "$@"
+    }
+  fi
+fi
+
+# Docker's default seccomp profile refuses the user namespaces Chromium's
+# sandbox needs; the add-on's own container on Home Assistant OS allows them
+# (read there with unshare as the antigravity user), so the test container is
+# started without that profile to be alike.
+docker run -d -i --name "$name" --security-opt seccomp=unconfined \
+  -e SUPERVISOR_TOKEN=smoke-secret -e HC_INGRESS_ALLOW=all -e HC_MCP_UPSTREAM=http://mcp.invalid/api/mcp "$image" >/dev/null
+
+for _ in $(seq 1 30); do
+  grep -q "ready" <<<"$(logs)" && break
+  sleep 1
+done
+grep -q "ready" <<<"$(logs)" || fail "the add-on never logged ready"
+
+# Not logged in: the add-on stays up and says so.
+status="$(docker exec "$name" ha-antigravity-status)"
+grep -q "antigravity login: no" <<<"$status" || fail "expected 'antigravity login: no'"
+grep -q "chat session: running" <<<"$status" || fail "the tmux session is not running"
+
+# The status command also works in the web terminal, which runs as the antigravity user.
+status="$(docker exec -u antigravity "$name" ha-antigravity-status)"
+grep -q "chat session: running" <<<"$status" || fail "the antigravity user does not see the chat session"
+grep -q "last sync: never (none)" <<<"$status" || fail "the antigravity user cannot read the sync status"
+
+# Ingress answers: the page with its two links, and a terminal behind each.
+page="$(docker exec "$name" curl -fsS http://127.0.0.1:7681/)" || fail "nginx does not answer on 7681"
+grep -q 'href="chat/"' <<<"$page" || fail "the page has no link to Claude"
+grep -q 'href="shell/"' <<<"$page" || fail "the page has no link to the shell"
+docker exec "$name" curl -fsS -o /dev/null http://127.0.0.1:7681/chat/ || fail "the Chat terminal does not answer"
+docker exec "$name" curl -fsS -o /dev/null http://127.0.0.1:7681/shell/ || fail "the shell terminal does not answer"
+docker exec "$name" curl -fsS -o /dev/null http://127.0.0.1:7681/chat/token || fail "the Chat terminal's own addresses do not work under its path"
+
+# the assistant's way to Home Assistant: one address, POST only. The upstream here
+# is a name that does not exist: nginx has started all the same, and a POST
+# is answered 502, which only a forwarded request gets. Anything the
+# listener does not forward is its own 404 or 405.
+code() { docker exec -u antigravity "$name" curl -s -m 20 -o /dev/null -w '%{http_code}' "$@"; }
+[[ "$(code -X POST http://127.0.0.1:7684/mcp)" == 502 ]] || fail "the listener did not try to forward a POST to its one address"
+[[ "$(code http://127.0.0.1:7684/mcp)" == 405 ]] || fail "the listener forwarded something other than a POST"
+[[ "$(code -X POST http://127.0.0.1:7684/mcp/x)" == 404 ]] || fail "the listener forwarded a second address"
+[[ "$(code -X POST http://127.0.0.1:7684/)" == 404 ]] || fail "the listener forwarded the root address"
+for _ in $(seq 1 20); do
+  grep -q "proxy: Home Assistant answered" <<<"$(logs)" && break
+  sleep 1
+done
+grep -q "proxy: Home Assistant answered 502 through the listener" <<<"$(logs)" || fail "the check at start did not log the answer"
+
+# The token is in a file the antigravity user cannot read, and not in the
+# configuration. The configuration is for root only too: an extra server's
+# address in it may hold a secret path.
+docker exec "$name" grep -q 'Bearer smoke-secret' /run/ha-antigravity/proxy-auth.conf || fail "the token file does not hold the token"
+docker exec -u antigravity "$name" cat /run/ha-antigravity/proxy-auth.conf >/dev/null 2>&1 && fail "the antigravity user can read the token file"
+conf="$(docker exec "$name" cat /etc/nginx/nginx.conf)" || fail "the nginx configuration cannot be read"
+grep -q 'mcp_upstream' <<<"$conf" || fail "the nginx configuration has no upstream"
+if grep -q 'smoke-secret' <<<"$conf"; then fail "the token is in the nginx configuration"; fi
+docker exec -u antigravity "$name" cat /etc/nginx/nginx.conf >/dev/null 2>&1 && fail "the antigravity user can read nginx's configuration"
+docker exec -u antigravity "$name" nginx -T >/dev/null 2>&1 && fail "the antigravity user can have nginx print its configuration"
+
+# The shell behind the second link runs as the antigravity user, without the token.
+who="$(docker exec "$name" /usr/local/bin/ha-antigravity-shell -c 'id -un; env | grep -c SUPERVISOR')" || true
+[[ "$who" == $'antigravity\n0' ]] || fail "the web terminal's shell is not a clean shell for the antigravity user: '$who'"
+
+# Nothing owned by the antigravity user can see the Supervisor token.
+# Read as the antigravity user: root in a container may not read another user's
+# environment, and a check that cannot read must fail, not pass.
+for pid in $(docker exec "$name" pgrep -u antigravity); do
+  environ="$(docker exec -u antigravity "$name" sh -c "tr '\0' '\n' < /proc/$pid/environ")" \
+    || fail "cannot read the environment of process $pid"
+  grep -q "HOME=" <<<"$environ" || fail "the environment of process $pid is empty"
+  if grep -q "smoke-secret\|SUPERVISOR_TOKEN" <<<"$environ"; then
+    fail "process $pid of user antigravity has the Supervisor token"
+  fi
+done
+docker exec "$name" pgrep -u antigravity tmux >/dev/null || fail "tmux is not running as antigravity"
+
+# The antigravity user cannot write the workspace or read the state folder.
+docker exec "$name" runuser -u antigravity -- touch /data/workspace/assistant/x 2>/dev/null && fail "workspace is writable by antigravity"
+docker exec "$name" runuser -u antigravity -- ls /data/state >/dev/null 2>&1 && fail "state is readable by antigravity"
+
+# The jobs server answers the antigravity user with the image's Node.
+init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
+answer="$(docker exec -i -u antigravity "$name" /usr/local/bin/ha-antigravity-jobs-mcp <<<"$init")" || fail "the jobs server did not run"
+grep -q '"protocolVersion":"2025-06-18"' <<<"$answer" || fail "the jobs server did not answer initialize: $answer"
+answer="$(docker exec -i -u antigravity "$name" /usr/local/bin/ha-antigravity-docs-mcp <<<"$init")" || fail "the documents server did not run"
+grep -q '"name":"documents"' <<<"$answer" || fail "the documents server did not answer initialize: $answer"
+docker exec "$name" pdftotext -v >/dev/null 2>&1 || fail "pdftotext is missing"
+docker exec -u antigravity "$name" unshare --user --map-root-user true \
+  || fail "the container allows no user namespaces, which the browser's sandbox needs"
+# The browser reads a page built with JavaScript, as the antigravity user, with
+# Chromium's sandbox on: the price is only on the page once its script ran.
+page="data:text/html,<div id=p></div><script>document.getElementById('p').textContent='Pris: '+(400+99)+' kr'</script>"
+full_init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"container-test","version":"1"}}}'
+first="$(printf '%s\n' "$full_init" '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  "$(jq -cn --arg u "$page" '{jsonrpc: "2.0", id: 2, method: "tools/call", params: {name: "browser_navigate", arguments: {url: $u}}}')")"
+then_find='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"browser_find","arguments":{"text":"Pris"}}}'
+answer="$( { printf '%s\n' "$first"; sleep 15; printf '%s\n' "$then_find"; sleep 10; } \
+  | docker exec -i -u antigravity -e HOME=/data/home -w /data/home "$name" timeout 60 /usr/local/bin/ha-antigravity-browser-mcp 2>&1)" \
+  || true
+grep -q 'Pris: 499 kr' <<<"$answer" || fail "the browser did not read a page built with JavaScript: $answer"
+docker exec "$name" ha-antigravity-browser-mcp </dev/null >/dev/null 2>&1 && fail "the browser started as root"
+docker exec "$name" test -x /usr/share/ha-antigravity/browsers/chrome-headless-shell || fail "the headless shell is not linked"
+for d in /usr/share/ha-antigravity/browsers /usr/local/lib/node_modules/@playwright; do
+  [ "$(docker exec "$name" stat -c %U "$d")" = root ] || fail "$d is not root's"
+  docker exec "$name" runuser -u antigravity -- test -w "$d" && fail "$d is writable by antigravity"
+  [ -z "$(docker exec "$name" find "$d" -perm /022 -not -type l | head -n 1)" ] || fail "something in $d is writable by others"
+done
+# The jobs' public copies can be read by the antigravity user and not written.
+docker exec "$name" runuser -u antigravity -- test -r /data/status || fail "status is not readable by antigravity"
+docker exec "$name" runuser -u antigravity -- touch /data/status/x 2>/dev/null && fail "status is writable by antigravity"
+docker exec "$name" runuser -u antigravity -- touch /data/handover/ok || fail "handover is not writable by antigravity"
+docker exec "$name" runuser -u antigravity -- touch /data/results/ok || fail "results is not writable by antigravity"
+
+# A session started from the web terminal is logged in the add-on's log.
+# Without a terminal the attach itself fails; the start before it is the test.
+docker exec "$name" bash -c 'runuser -u antigravity -- tmux -L ha kill-server; /usr/local/bin/ha-antigravity-attach' >/dev/null 2>&1 || true
+grep -q "web terminal: no chat session, starting one" <<<"$(logs)" \
+  || fail "a session started from the web terminal was not logged"
+docker exec "$name" pgrep -u antigravity tmux >/dev/null || fail "the web terminal did not start the chat session"
+
+# Managed settings: a file in the working folder is installed by the sync
+# command, readable by the antigravity user and not writable by it.
+docker exec "$name" bash -c 'mkdir -p /data/workspace/assistant/.agents && echo "{\"smoke\":1}" > /data/workspace/assistant/.agents/managed-settings.json'
+printf '"sync"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 20); do
+  grep -q "outcome: sync=ok" <<<"$(logs)" && break
+  sleep 1
+done
+docker exec "$name" runuser -u antigravity -- grep -q smoke /etc/ha-antigravity/settings.json \
+  || fail "the antigravity user cannot read the managed settings"
+docker exec "$name" runuser -u antigravity -- sh -c 'echo x >> /etc/ha-antigravity/settings.json' 2>/dev/null \
+  && fail "the antigravity user can write the managed settings"
+
+# Commands on standard input: unknown is ignored, ping is handled.
+# KILL, because the Docker client does not exit on a single TERM.
+printf '"nonsense"\n"ping"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 20); do
+  grep -q "outcome: ping=ok" <<<"$(logs)" && break
+  sleep 1
+done
+grep -q "ignoring unknown command" <<<"$(logs)" || fail "unknown command was not ignored"
+grep -q "outcome: ping=ok" <<<"$(logs)" || fail "ping was not handled"
+docker inspect -f '{{.State.Running}}' "$name" | grep -q true || fail "the add-on stopped"
+
+# The morning command: without the option morning_job it is not
+# configured. With it naming a job file from the working folder whose after
+# step clears the chat, and nobody logged in, the run fails or is stopped,
+# the chat session is started again, the outcome is reported, and what the
+# run printed is out of the antigravity user's reach.
+printf '"morning"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 20); do
+  grep -q "outcome: morning=" <<<"$(logs)" && break
+  sleep 1
+done
+grep -q "outcome: morning=not_configured" <<<"$(logs)" || fail "morning without morning_job was not not_configured"
+docker exec "$name" bash -c 'mkdir -p /data/workspace/assistant/.agents/agents /data/workspace/assistant/jobs && touch /data/workspace/assistant/.agents/agents/night-briefing.md && echo "{\"agent\":\"night-briefing\",\"run_by\":\"automation\",\"schedule\":{\"time\":\"06:30\"},\"enabled\":true,\"timeout\":20,\"context\":[\"handover\"],\"after\":[\"clear_chat\"]}" > /data/workspace/assistant/jobs/night-briefing.json && echo "{\"morning_job\":\"night-briefing\"}" > /data/options.json'
+syncs_before="$(logs | grep -c 'outcome: sync=' || true)"
+printf '"sync"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+  [[ "$(logs | grep -c 'outcome: sync=')" -gt "$syncs_before" ]] && break
+  sleep 1
+done
+docker exec "$name" test -f /data/jobs/night-briefing.json || fail "the job file was not placed"
+docker exec "$name" runuser -u antigravity -- sh -c 'mkdir -p /data/handover/sub/.agents && touch /data/handover/CLAUDE.md /data/handover/sub/.agents/x'
+starts_before="$(logs | grep -c 'chat: starting a new session')"
+printf '"morning"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 90); do
+  grep -q -E "outcome: morning=(failed|timeout)" <<<"$(logs)" && break
+  sleep 1
+done
+grep -q -E "outcome: morning=(failed|timeout)" <<<"$(logs)" || fail "the morning command did not report failed or timeout"
+docker exec "$name" test -f /data/state/job-night-briefing.log || fail "the morning run's output was not kept"
+docker exec "$name" test ! -e /data/handover/CLAUDE.md || fail "a file that reads as instructions survived in the handover folder"
+docker exec "$name" test ! -e /data/handover/sub/.agents || fail "a settings folder survived in the handover folder"
+docker exec "$name" test -d /data/handover/sub || fail "the clean-up removed more than it should"
+docker exec "$name" runuser -u antigravity -- cat /data/state/job-night-briefing.log >/dev/null 2>&1 && fail "the antigravity user can read the morning run's output"
+[[ "$(logs | grep -c 'chat: starting a new session')" -gt "$starts_before" ]] || fail "no new chat session after the morning command"
+for _ in $(seq 1 10); do
+  docker exec "$name" pgrep -u antigravity tmux >/dev/null && break
+  sleep 1
+done
+docker exec "$name" pgrep -u antigravity tmux >/dev/null || fail "no chat session after the morning command"
+
+# The report command: the working folder's .agents/report runs as the Claude
+# user with the month as its argument; what it prints reaches the log framed,
+# what it prints on standard error does not, a Danish letter survives, and the
+# output file is gone afterwards. A file the antigravity user cannot run is
+# not_configured, although root could run it.
+docker exec "$name" bash -c 'mkdir -p /data/workspace/assistant/.agents && printf "%s\n" "#!/bin/sh" "echo \"report for \$1\"" "echo \"outcome: sync=ok\"" "echo \"køkken | 1\"" "printf \"stray\\205byte\\n\"" "echo secret-on-stderr >&2" > /data/workspace/assistant/.agents/report && chmod 755 /data/workspace/assistant/.agents/report'
+reports_before="$(logs | grep -c 'outcome: report=' || true)"
+printf '"report 2026-09"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do
+  [[ "$(logs | grep -c 'outcome: report=')" -gt "$reports_before" ]] && break
+  sleep 1
+done
+grep -q "outcome: report=ok" <<<"$(logs)" || fail "the report command did not report ok"
+grep -q "report: | report for 2026-09" <<<"$(logs)" || fail "the month did not reach the report file"
+grep -q "report: | outcome: sync=ok" <<<"$(logs)" || fail "a line that imitates the log was not framed"
+grep -q "report: | køkken | 1" <<<"$(logs)" || fail "a Danish letter did not survive the cleaning"
+grep -q "report: | straybyte" <<<"$(logs)" || fail "a byte that is not UTF-8 was not dropped"
+grep -q "report: end, 4 lines" <<<"$(logs)" || fail "the frame's end line is missing"
+if grep -q "secret-on-stderr" <<<"$(logs)"; then fail "standard error reached the log"; fi
+docker exec "$name" test ! -e /data/state/report.out || fail "the report's output file was not removed"
+docker exec "$name" chmod 700 /data/workspace/assistant/.agents/report
+reports_before="$(logs | grep -c 'outcome: report=' || true)"
+printf '"report"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+  [[ "$(logs | grep -c 'outcome: report=')" -gt "$reports_before" ]] && break
+  sleep 1
+done
+grep -q "outcome: report=not_configured" <<<"$(logs)" || fail "a file the antigravity user cannot run was not reported as not_configured"
+# A file that floods its output is stopped at the cap, as the antigravity user
+# under runuser, and is failed within seconds.
+docker exec "$name" bash -c 'printf "%s\n" "#!/bin/sh" "yes \"\" | head -c 1000000" "echo x" > /data/workspace/assistant/.agents/report && chmod 755 /data/workspace/assistant/.agents/report'
+reports_before="$(logs | grep -c 'outcome: report=' || true)"
+printf '"report"\n' | timeout -s KILL 5 docker attach --sig-proxy=false "$name" >/dev/null 2>&1 || true
+for _ in $(seq 1 20); do
+  [[ "$(logs | grep -c 'outcome: report=')" -gt "$reports_before" ]] && break
+  sleep 1
+done
+[[ "$(logs | grep -c 'outcome: report=failed')" -ge 1 ]] || fail "a file that floods its output was not stopped at the cap"
+docker exec "$name" test ! -e /data/state/report.out || fail "the flood's output file was not removed"
+docker exec "$name" rm -f /data/workspace/assistant/.agents/report
+
+# Retention: a handover file dated long ago is gone after a restart.
+docker exec "$name" runuser -u antigravity -- touch /data/handover/1999-01-01.md /data/handover/keep.md
+docker restart "$name" >/dev/null
+for _ in $(seq 1 60); do
+  [[ "$(logs | grep -c '\] ready$')" -ge 2 ]] && break
+  sleep 1
+done
+[[ "$(logs | grep -c '\] ready$')" -ge 2 ]] || fail "the add-on did not log ready after the restart"
+docker exec "$name" test ! -e /data/handover/1999-01-01.md || fail "an old handover file survived a restart"
+docker exec "$name" test -e /data/handover/keep.md || fail "retention removed a file that is not a handover file"
+
+# The line that lets only the Supervisor reach the panel. Every container
+# here runs without it, so that the test can reach the panel itself. Here
+# nginx reads the configuration as a real system has it, and then runs
+# with it: the panel refuses this container's own request, and Claude's
+# way to Home Assistant, which is on the loopback and has no such line,
+# still answers.
+# shellcheck disable=SC2016  # expanded by the shell inside the container
+real='for f in paths log options web; do . /usr/local/lib/ha-antigravity/$f.sh; done
+  unset HC_INGRESS_ALLOW
+  ( umask 077; render_nginx_conf /etc/nginx/templates/ingress.conf.tpl > /etc/nginx/nginx.real.conf ) || exit 1
+  grep -q "allow 172.30.32.2; deny all;" /etc/nginx/nginx.real.conf || exit 2
+  nginx -t -q -c /etc/nginx/nginx.real.conf || exit 3
+  cp -p /etc/nginx/nginx.real.conf /etc/nginx/nginx.conf && nginx -s reload'
+docker exec "$name" bash -c "$real" || fail "nginx does not take the configuration with the Supervisor-only line (status $?)"
+refused=""
+for _ in $(seq 1 10); do
+  refused="$(docker exec "$name" curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:7681/)" || true
+  [[ "$refused" == 403 ]] && break
+  sleep 1
+done
+[[ "$refused" == 403 ]] || fail "with the Supervisor-only line the panel answered '$refused' to another address, not 403"
+# The workers of the old configuration are given a moment to end.
+sleep 2
+[[ "$(docker exec "$name" curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:7681/chat/)" == 403 ]] || fail "with the Supervisor-only line a terminal still answered another address"
+[[ "$(code http://127.0.0.1:7684/mcp)" == 405 ]] || fail "the listener stopped answering when the panel got its Supervisor-only line"
+
+# Antigravity CLI reads a PDF by rendering its pages with pdftoppm: the Claude
+# user can turn a one-page PDF into an image.
+docker exec -u antigravity "$name" sh -c 'd="$(mktemp -d)" && cd "$d" \
+  && printf "%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 72 72]>>endobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n" > t.pdf \
+  && pdftoppm -png -r 20 t.pdf page && ls page*.png' >/dev/null 2>&1 || fail "pdftoppm cannot render a PDF, so Claude cannot read one"
+
+docker rm -f "$name" >/dev/null
+
+# What the listener sends on: a second container whose upstream is a
+# stand-in that answers with the method, the address and the token it got.
+# The token is the add-on's also when the client sent another, and the
+# client's query string is dropped.
+docker run -d -i --name "$name" -e SUPERVISOR_TOKEN=smoke-secret -e HC_INGRESS_ALLOW=all \
+  -e HC_MCP_UPSTREAM=http://127.0.0.1:7690/core/api/mcp \
+  -e "HC_EXTRA_MCP=$(printf 'x=http://127.0.0.1:7691/private_s3cret\nz=http://127.0.0.1:7692/held\ntls=https://example.invalid/x')" \
+  -e HC_EXTRA_MCP_AUTH=z=extra-secret "$image" >/dev/null
+for _ in $(seq 1 30); do
+  grep -q "ready" <<<"$(logs)" && break
+  sleep 1
+done
+grep -q "ready" <<<"$(logs)" || fail "the second container never logged ready"
+docker exec -d "$name" node -e 'require("http").createServer((q, s) => s.end(q.method + " " + q.url + " " + (q.headers.authorization || "none"))).listen(7690, "127.0.0.1")' || fail "the stand-in upstream did not start"
+sent=""
+for _ in $(seq 1 10); do
+  sent="$(docker exec -u antigravity "$name" curl -s -m 10 -X POST -H 'Authorization: Bearer other' -d '{}' 'http://127.0.0.1:7684/mcp?x=1')" || true
+  [[ "$sent" == POST* ]] && break
+  sleep 1
+done
+[[ "$sent" == "POST /core/api/mcp Bearer smoke-secret" ]] || fail "the listener sent on '$sent'"
+
+# An extra MCP server: the listener forwards POST /mcp/x to it without the
+# add-on's token, answers GET and other names itself, and with the server
+# down neither its address nor its secret path reaches the log.
+[[ "$(code -X POST http://127.0.0.1:7684/mcp/x)" == 502 ]] || fail "the extra address was not forwarded while its server is down"
+if grep -q "7691\|private_s3cret" <<<"$(logs)"; then fail "the extra server's address reached the log"; fi
+[[ "$(code http://127.0.0.1:7684/mcp/x)" == 405 ]] || fail "the extra address forwarded something other than a POST"
+[[ "$(code -X POST http://127.0.0.1:7684/mcp/y)" == 404 ]] || fail "an extra name that is not configured was forwarded"
+docker exec -d "$name" node -e 'require("http").createServer((q, s) => s.end(q.method + " " + q.url + " " + (q.headers.authorization || "none"))).listen(7691, "127.0.0.1")' || fail "the extra stand-in did not start"
+sent=""
+for _ in $(seq 1 10); do
+  sent="$(docker exec -u antigravity "$name" curl -s -m 10 -X POST -H 'Authorization: Bearer other' -d '{}' 'http://127.0.0.1:7684/mcp/x')" || true
+  [[ "$sent" == POST* ]] && break
+  sleep 1
+done
+[[ "$sent" == "POST /private_s3cret none" ]] || fail "the listener sent on to the extra server '$sent'"
+grep -q "proxy: x answered" <<<"$(logs)" || fail "the extra server was not probed at start"
+
+# An extra MCP server with a token of its own: the listener sends that
+# token and no other, whatever the client sent; the antigravity user cannot read
+# the file that holds it, and it is in no log line.
+docker exec -d "$name" node -e 'require("http").createServer((q, s) => s.end(q.method + " " + q.url + " " + (q.headers.authorization || "none"))).listen(7692, "127.0.0.1")' || fail "the second extra stand-in did not start"
+sent=""
+for _ in $(seq 1 10); do
+  sent="$(docker exec -u antigravity "$name" curl -s -m 10 -X POST -H 'Authorization: Bearer other' -d '{}' 'http://127.0.0.1:7684/mcp/z')" || true
+  [[ "$sent" == POST* ]] && break
+  sleep 1
+done
+[[ "$sent" == "POST /held Bearer extra-secret" ]] || fail "the listener sent on to the server with a token '$sent'"
+docker exec "$name" test -f /run/ha-antigravity/extra-auth-z.conf || fail "the extra server's token file is missing"
+docker exec -u antigravity "$name" cat /run/ha-antigravity/extra-auth-z.conf >/dev/null 2>&1 && fail "the antigravity user can read an extra server's token"
+if grep -q "extra-secret\|smoke-secret" <<<"$(logs)"; then fail "a token reached the log"; fi
+
+# An https server: nginx started with its location, so the directives and
+# the certificate bundle are ones this nginx takes; a name that does not
+# resolve answers 502. The configuration itself is for root only.
+[[ "$(code -X POST http://127.0.0.1:7684/mcp/tls)" == 502 ]] || fail "the https extra address did not answer 502 for a name that does not resolve"
+docker exec -u antigravity "$name" cat /etc/nginx/nginx.conf >/dev/null 2>&1 && fail "the antigravity user can read nginx's configuration"
+
+docker rm -f "$name" >/dev/null
+echo "container smoke test passed"

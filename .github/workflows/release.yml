@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Nothing by default; each job below asks for what it needs.
+permissions: {}
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  image:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            docker_arch: amd64
+            ha_arch: amd64
+          - runner: ubuntu-24.04-arm
+            docker_arch: arm64
+            ha_arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, test and push
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.release-please.outputs.version }}-${{ matrix.docker_arch }}
+        run: |
+          docker build -t "$IMAGE" \
+            --build-arg BUILD_VERSION=${{ needs.release-please.outputs.version }} \
+            --build-arg BUILD_ARCH=${{ matrix.ha_arch }} ha-antigravity
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "::warning::could not allow unprivileged user namespaces; the browser's sandbox may not start"
+          tests/container.sh "$IMAGE"
+          docker push "$IMAGE"
+
+  publish:
+    needs: [release-please, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+          fetch-depth: 0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Join the two images under the version tag
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.release-please.outputs.version }}
+        run: docker buildx imagetools create -t "$IMAGE" "$IMAGE-amd64" "$IMAGE-arm64"
+      - name: Publish the manifest
+        run: git push origin "HEAD:refs/heads/release"
