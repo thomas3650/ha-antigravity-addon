@@ -46,7 +46,7 @@ ensure_layout() {
   for d in "$cdir/plugins" "$cdir/agents" "$cdir/skills" "$cdir/rules"; do
     [[ -L "$d" ]] && rm -f "$d"
     mkdir -p "$d"
-    [[ "$(id -u)" == 0 ]] && chmod 755 "$d" 2>/dev/null || true
+    if [[ "$(id -u)" == 0 ]]; then chmod 755 "$d" 2>/dev/null || true; fi
   done
 
   if [[ "$(id -u)" == 0 ]]; then
