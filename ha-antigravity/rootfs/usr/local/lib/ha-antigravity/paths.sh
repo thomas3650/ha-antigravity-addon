@@ -12,7 +12,7 @@
 : "${HC_USER:=antigravity}"
 : "${HC_MANAGED_DIR:=/etc/ha-antigravity}"
 : "${HC_SESSION_MARK:=$HC_HOME/.cache/ha-antigravity/session-mark}"
-: "${HC_AUTH_FILE:=$HC_HOME/.config/antigravity/plugin-secrets.json}"
+: "${HC_AUTH_FILE:=$HC_HOME/.gemini/antigravity-cli/antigravity-oauth-token}"
 : "${HC_JOBS:=$HC_DATA/jobs}"
 : "${HC_JOB_RESULTS:=$HC_RESULTS/jobs}"
 : "${HC_JOB_STATE:=$HC_STATE/jobs}"

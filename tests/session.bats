@@ -34,19 +34,20 @@ load helpers
   [ "${lines[${#lines[@]}-1]}" = "Present today's summary" ]
 }
 
-@test "logged_in follows the credentials file and headless authstore.enc" {
+@test "logged_in detects antigravity-oauth-token and fallback auth files" {
   load_lib options session
+  [[ "$HC_AUTH_FILE" == */.gemini/antigravity-cli/antigravity-oauth-token ]]
   run logged_in
   [ "$status" -ne 0 ]
   mkdir -p "$(dirname "$HC_AUTH_FILE")"
-  printf '{"token":"ok"}\n' > "$HC_AUTH_FILE"
+  printf '{"access_token":"ok"}\n' > "$HC_AUTH_FILE"
   run logged_in
   [ "$status" -eq 0 ]
   rm -f "$HC_AUTH_FILE"
   run logged_in
   [ "$status" -ne 0 ]
-  mkdir -p "$HC_HOME/.gemini/antigravity-cli"
-  printf 'enc' > "$HC_HOME/.gemini/antigravity-cli/authstore.enc"
+  mkdir -p "$HC_HOME/.config/antigravity"
+  printf 'cred' > "$HC_HOME/.config/antigravity/credential-user-scope"
   run logged_in
   [ "$status" -eq 0 ]
 }
