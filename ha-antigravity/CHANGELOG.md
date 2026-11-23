@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/thomas3650/ha-antigravity-addon/compare/v0.2.1...v0.2.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* detect headless Linux antigravity-oauth-token file ([#5](https://github.com/thomas3650/ha-antigravity-addon/issues/5)) ([a604890](https://github.com/thomas3650/ha-antigravity-addon/commit/a604890bc48f963415270d20d386550725d7ef12))
+
 ## [0.2.1](https://github.com/thomas3650/ha-antigravity-addon/compare/v0.2.0...v0.2.1) (2026-11-23)
 
 
