@@ -19,8 +19,8 @@ add-on, as an always-on personal assistant.
    instructions to run `agy` and follow the Google OAuth link. Open the URL
    in a browser, paste the authorization code back into the terminal, then
    type `/exit` so the add-on starts the always-on Remote Control session.
-   Credentials persist in `/data/home/.config/antigravity/` across restarts
-   and updates.
+   Credentials persist in `/data/home/.gemini/antigravity-cli/` across
+   restarts and updates.
 
 ## Options
 

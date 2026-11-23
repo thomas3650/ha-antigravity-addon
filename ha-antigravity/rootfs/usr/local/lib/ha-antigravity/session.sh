@@ -12,7 +12,7 @@ logged_in() {
   for d in "$HC_HOME/.gemini/antigravity-cli" "$HC_HOME/.config" "$HC_HOME/.local/share"; do
     [[ -d "$d" ]] || continue
     f="$(find "$d" -maxdepth 3 -type f -size +0c \
-         \( -name 'authstore.enc' -o -name 'auth.json' -o -name 'plugin-secrets.json' \) \
+         \( -name 'antigravity-oauth-token' -o -name 'credential-user-scope' -o -name 'authstore.enc' -o -name 'auth.json' -o -name 'plugin-secrets.json' \) \
          2>/dev/null | head -n 1)"
     [[ -n "$f" ]] && return 0
   done
