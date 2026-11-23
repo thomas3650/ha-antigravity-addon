@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/thomas3650/ha-antigravity-addon/compare/v0.2.0...v0.2.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* detect headless agy authstore.enc and auth.json in logged_in ([#3](https://github.com/thomas3650/ha-antigravity-addon/issues/3)) ([f06db7e](https://github.com/thomas3650/ha-antigravity-addon/commit/f06db7efe28c07e282521c6881ce86239ef4f4c9))
+
 ## [0.2.0](https://github.com/thomas3650/ha-antigravity-addon/compare/v0.1.0...v0.2.0) (2026-11-22)
 
 
