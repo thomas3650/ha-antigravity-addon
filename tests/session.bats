@@ -34,12 +34,19 @@ load helpers
   [ "${lines[${#lines[@]}-1]}" = "Present today's summary" ]
 }
 
-@test "logged_in follows the credentials file" {
+@test "logged_in follows the credentials file and headless authstore.enc" {
   load_lib options session
   run logged_in
   [ "$status" -ne 0 ]
   mkdir -p "$(dirname "$HC_AUTH_FILE")"
   printf '{"token":"ok"}\n' > "$HC_AUTH_FILE"
+  run logged_in
+  [ "$status" -eq 0 ]
+  rm -f "$HC_AUTH_FILE"
+  run logged_in
+  [ "$status" -ne 0 ]
+  mkdir -p "$HC_HOME/.gemini/antigravity-cli"
+  printf 'enc' > "$HC_HOME/.gemini/antigravity-cli/authstore.enc"
   run logged_in
   [ "$status" -eq 0 ]
 }
