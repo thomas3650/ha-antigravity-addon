@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/thomas3650/ha-antigravity-addon/compare/v0.2.2...v0.2.3) (2026-11-24)
+
+
+### Bug Fixes
+
+* Antigravity CLI 1.5.15 and this week's base images ([#2](https://github.com/thomas3650/ha-antigravity-addon/issues/2)) ([1a3c0aa](https://github.com/thomas3650/ha-antigravity-addon/commit/1a3c0aa12825d417047062ba4ef0cb2e19fd7157))
+
 ## [0.2.2](https://github.com/thomas3650/ha-antigravity-addon/compare/v0.2.1...v0.2.2) (2026-11-23)
 
 
